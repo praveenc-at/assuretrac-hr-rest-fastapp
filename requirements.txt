@@ -7,3 +7,5 @@ langgraph
 langchain-openai
 typing-extensions
 pydantic
+pandas
+openpyxl

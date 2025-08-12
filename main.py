@@ -14,6 +14,16 @@ from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import List
+import os
+import io
+import ssl
+import smtplib
+import threading
+from email.message import EmailMessage
+import pandas as pd
+import re
 
 # Load env variables
 load_dotenv()
@@ -41,6 +51,17 @@ class State(TypedDict):
     node_name: str
     user_details: Optional[dict] = None
     tech_stack_details: Optional[List[dict]] = None
+
+
+class TechStackItem(BaseModel):
+    technology: str = Field(..., description="Name of the technology")
+    experience_years: float = Field(..., description="Years of experience with this technology")
+    rating_out_of_10: int = Field(..., description="Self-assessed rating out of 10")
+    explanation: str = Field(..., description="Brief explanation of the experience with this technology")
+
+class TechStackResponse(BaseModel):
+    tech_stacks: List[TechStackItem] = Field(..., description="List of technologies the user has worked with")
+
 
 def build_conversation_text(state: State, max_messages: Optional[int] = None) -> Tuple[str, str, List[str]]:
     """
@@ -75,7 +96,81 @@ def build_conversation_text(state: State, max_messages: Optional[int] = None) ->
     last_msg_text = convo_lines[-1].split(":", 1)[1].strip() if convo_lines else ""
     return all_messages_text, last_msg_text, convo_lines
 
-import re
+def create_excel_bytes(personal: dict = None, tech_stack_list: list = None) -> bytes:
+    """
+    Create an in-memory Excel (.xlsx) file.
+    If personal is provided, writes a 'personal' sheet.
+    If tech_stack_list is provided, writes a 'tech_stack' sheet.
+    Returns bytes.
+    """
+    personal = personal or {}
+    tech_stack_list = tech_stack_list or []
+
+    with io.BytesIO() as buffer:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            # Personal sheet only if personal has any keys
+            if personal:
+                pd.DataFrame([personal]).to_excel(writer, index=False, sheet_name="personal")
+            # Tech sheet only if tech_stack_list has items
+            if tech_stack_list:
+                pd.DataFrame(tech_stack_list).to_excel(writer, index=False, sheet_name="tech_stack")
+
+        buffer.seek(0)
+        return buffer.read()
+
+
+# def _smtp_send_message(msg: EmailMessage):
+#     """Blocking SMTP send; run in background thread."""
+#     host = os.getenv("SMTP_HOST")
+#     port = int(os.getenv("SMTP_PORT", "587"))
+#     user = os.getenv("SMTP_USER")
+#     password = os.getenv("SMTP_PASSWORD")
+#     use_ssl = os.getenv("SMTP_USE_SSL", "false").lower() in ("true", "1", "yes")
+
+#     try:
+#         if use_ssl or port == 465:
+#             context = ssl.create_default_context()
+#             with smtplib.SMTP_SSL(host, port, context=context) as smtp:
+#                 if user and password:
+#                     smtp.login(user, password)
+#                 smtp.send_message(msg)
+#         else:
+#             with smtplib.SMTP(host, port) as smtp:
+#                 smtp.starttls(context=ssl.create_default_context())
+#                 if user and password:
+#                     smtp.login(user, password)
+#                 smtp.send_message(msg)
+#         print("Email sent successfully.")
+#     except Exception as e:
+#         # Log or print; in production, integrate with proper logs
+#         print("Failed to send email:", e)
+
+
+# def send_email_with_attachment_background(subject: str, body: str, attachment_bytes: bytes, attachment_filename: str):
+#     """
+#     Build EmailMessage and send in background daemon thread.
+#     """
+#     from_addr = os.getenv("EMAIL_FROM")
+#     to_addrs = os.getenv("EMAIL_TO", "")
+#     if not to_addrs:
+#         print("EMAIL_TO not configured, not sending email.")
+#         return
+
+#     recipients = [addr.strip() for addr in to_addrs.split(",") if addr.strip()]
+
+#     msg = EmailMessage()
+#     msg["Subject"] = subject
+#     msg["From"] = from_addr
+#     msg["To"] = ", ".join(recipients)
+#     msg.set_content(body)
+
+#     # Attach excel
+#     maintype = "application"
+#     subtype = "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+#     msg.add_attachment(attachment_bytes, maintype=maintype, subtype=subtype, filename=attachment_filename)
+
+#     thread = threading.Thread(target=_smtp_send_message, args=(msg,), daemon=True)
+#     thread.start()
 
 def naviagate_to_respective_node(state: State) -> dict:
     """ Determine the next node to navigate to based on the conversation history."""
@@ -112,33 +207,12 @@ def naviagate_to_respective_node(state: State) -> dict:
         else:
             message = message + msg.content + "\n"
 
-    print("message in naviagate_to_respective_node -->", message)
+    print("message in naviagate_to_respective_node -->\n", message)
     print("\n\n")
-    # prompt = (
-    #     "You are an orchestration assistant for a HR voice chatbot. FOLLOW THESE PRIORITY RULES (HIGHEST first):\n"
-    #     "1) If the last user message is ONLY a greeting like Hi, Hello -> return 'ask_user_if_interested'.\n"
-    #     "2) If the user clearly says they are NOT interested -> return 'greet_bye'.\n"
-    #     "3) If the user clearly indicates interest (yes/I'm interested) in the Job oppurtunity -> return 'confirm_user_interest'.\n"
-    #     "4) If the user's last message confirms he is interested in the job opening then we should extract the user info OR collect the personal details (email/phone/full name) -> return 'extract_user_details'.\n"
-    #     "5) If the user's have shared personal details (email, phone, full name) in their last message, we should share back the details user shared with us and get the confirmation if the personal details are correct -> return 'confirm_user_details' . \n"
-    #     "6) If the user confirms the personal details are correct, then we need to fetch the technical details so return -> 'fetch_user_tech_stack_node'.\n"
-    #     "7) Otherwise inspect the full conversation and choose the node that best continues the flow.\n\n"
-
-    #     "Here are the conversation messages which you can use to understand the context and return what is expected:\n"
-    #     f" Conversation :\n {message}\n"
-    #     "You must respond with EXACTLY one node name from this set by understanding the whole conversation. Do not just see the last message OR input. Please understand whole conversation and provide the node name:"
-    #     "ask_user_if_interested --> If the input is a greeting alone.\n "
-    #     "confirm_user_interest --> After we receive the user response to the question like 'Are you interested in the job opening?'\n"
-    #     "extract_user_details --> After the user confirms he is interested in the job opening and we need to collect the personal details like Name, Email and Phone Number.\n"
-    #     "confirm_user_details --> When we have collected the personal details and we need to confirm if the details are correct.\n"
-    #     "fetch_user_tech_stack_node --> When we have confirmed the personal details are correct and we need to collect the technical details from the user.\n"
-    #     "greet_bye --> When the user is not interested in the job opening or when we have collected all the details and we need to end the conversation.\n\n"
-
-    #     "OUTPUT: Reply with EXACTLY one node name from: [ask_user_if_interested, confirm_user_interest, extract_user_details, confirm_user_details, fetch_user_tech_stack_node, greet_bye]\n"
-    # )
+    
     prompt = (
         "You are an orchestration assistant for an HR voice chatbot.\n"
-        "Your task is to select the NEXT node to execute based on the FULL conversation.\n"
+        "Your task is to select the NEXT node to execute based on the FULL conversation. You have the FULL Conversation below. Please understand what is conversation and return the name of the node as per the Rules or Instructions\n"
         "You must follow the rules below in strict priority order (higher rules override lower ones).\n\n"
 
         "RULES (Highest priority first):\n"
@@ -173,7 +247,6 @@ def naviagate_to_respective_node(state: State) -> dict:
         "Do not output anything other than the node name.\n"
         "If you are unsure, default to 'ask_user_if_interested' to re-engage the user.\n"
         "Make sure you understand the conversation and decide node name \n"
-        "Make sure to choose the node that best fits the conversation context and follows the rules above.\n"
         "Do not hallucinate or make up node names, only return node names based on the context provided.\n"
     )
 
@@ -217,14 +290,6 @@ def confirm_user_interest(state: State) -> dict:
     else:
         return {"messages": [AIMessage(content='No problem, we will come back to you later. Have a great day!')]}
 
-# def extract_user_details(state: State) -> dict:
-#     text = state["messages"][-1].content
-#     prompt = f"Extract Full Name, Email and Phone Number from: User Response: {text}"
-#     res = llm.with_structured_output(UserDetails).invoke([HumanMessage(content=prompt)])
-#     with open("user_details.json", "w") as f:
-#         json.dump(res.dict(), f, indent=4)
-#     return {"messages": [AIMessage(content=f"Got your details: {res.dict()}" + "Please do confirm if the details are correct." )]}
-
 def extract_user_details(state: State) -> dict:
     """ Extract user details (full name, email, phone) from the last user message and inform to the user back."""
     text = state["messages"][-1].content
@@ -233,8 +298,18 @@ def extract_user_details(state: State) -> dict:
     user_details = res.model_dump()
     # STORE into the state for later checks
     state["user_details"] = user_details
-    with open("user_details.json", "w") as f:
-        json.dump(user_details, f, indent=4)
+    # with open("user_details.json", "w") as f:
+    #     json.dump(user_details, f, indent=4)
+
+    # Create an Excel with only personal sheet
+    # excel_bytes = create_excel_bytes(personal=user_details, tech_stack_list=None)
+
+    # subject = "User Personal Details"
+    # body = "Hello,\n Attached are the personal details provided by the user."
+
+    # Send email in background
+    # send_email_with_attachment_background(subject, body, excel_bytes, "personal_details.xlsx")
+
     return {"messages": [AIMessage(content=f"Got your details: {user_details}. Please do confirm if the details are correct.")]}
 
 def confirm_user_details(state: State) -> dict:
@@ -272,34 +347,15 @@ def confirm_user_details(state: State) -> dict:
             ]
         }
 
-# def fetch_user_tech_stack_node(state: State) -> dict:
-#     return {"messages": [AIMessage(content="Please share your experience, rating, and explanation for each required tech stack.")]}  
-
-from pydantic import BaseModel, Field
-from typing import List
-
-
-class TechStackItem(BaseModel):
-    technology: str = Field(..., description="Name of the technology")
-    experience_years: float = Field(..., description="Years of experience with this technology")
-    rating_out_of_10: int = Field(..., description="Self-assessed rating out of 10")
-    explanation: str = Field(..., description="Brief explanation of the experience with this technology")
-
-class TechStackResponse(BaseModel):
-    tech_stacks: List[TechStackItem] = Field(..., description="List of technologies the user has worked with")
-
 
 def fetch_user_tech_stack_node(state: State) -> dict:
     """ Extracts user's tech stack details based on the technical details we got from user."""
     print("state[messages] in fetch_user_tech_stack_node -->", state["messages"])
 
-    # Last message from the user containing tech stack info
     user_input = state["messages"][-1].content
 
-    # Create a model that outputs in structured JSON
     model_with_structured_output = llm.with_structured_output(TechStackResponse)
 
-    # Prompt to guide extraction
     prompt = f"""
         You are an assistant that extracts a user's technical skills, years of experience, ratings, 
         and brief explanations from their message. Always return valid JSON in the schema provided.
@@ -308,13 +364,27 @@ def fetch_user_tech_stack_node(state: State) -> dict:
         {user_input}
         """
 
-    # Invoke the structured extraction
     result: TechStackResponse = model_with_structured_output.invoke(prompt)
 
     print("Extracted tech stack:", result.model_dump_json())
 
-    with open("tech_stack_details.json", "w") as f:
-        json.dump(result.model_dump(), f, indent=4)
+    tech_stack_py = result.model_dump()
+    tech_list = tech_stack_py.get("tech_stacks", [])
+
+    # with open("tech_stack_details.json", "w") as f:
+    #     json.dump(result.model_dump(), f, indent=4)
+
+    state["tech_stack_details"] = tech_list
+
+    # Create Excel with only tech sheet
+    # excel_bytes = create_excel_bytes(personal=None, tech_stack_list=tech_list)
+
+    # subject = "User Technical Details"
+    # body = "Attached are the technical details provided by the user."
+
+    # # Send email in background
+    # send_email_with_attachment_background(subject, body, excel_bytes, "technical_details.xlsx")
+
 
     return {
         "messages": [
@@ -392,16 +462,12 @@ async def chat_with_agent(msg: MessageInput):
     if user_id not in conversation_states:
         conversation_states[user_id] = {"messages": []}
 
-    # Append user message to state
     conversation_states[user_id]["messages"].append(HumanMessage(content=msg.message))
 
-    # Run graph
     final_state = compile_graph.invoke(conversation_states[user_id])
 
-    # Store updated state
     conversation_states[user_id] = final_state
 
-    # Extract last assistant reply
     ai_msgs = [m for m in final_state["messages"] if isinstance(m, AIMessage) ]
     reply = ai_msgs[-1].content if ai_msgs else "No reply."
 
