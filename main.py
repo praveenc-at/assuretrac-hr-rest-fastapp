@@ -29,7 +29,7 @@ import re
 load_dotenv()
 
 # --- LLM Config ---
-llm = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
+llm = ChatOpenAI(model="gpt-4o-mini", api_key="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")
 
 # --- Data Models ---
 class UserDetails(BaseModel):
